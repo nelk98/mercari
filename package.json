@@ -1,0 +1,18 @@
+{
+  "name": "mercari-push-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": ["web", "server", "desktop"],
+  "scripts": {
+    "dev": "concurrently -k -n server,web -c green,cyan \"pnpm --filter server dev\" \"pnpm --filter web dev\"",
+    "start": "concurrently -k -n server,web -c green,cyan \"pnpm --filter server start\" \"pnpm --filter web dev\"",
+    "install:all": "pnpm install -r",
+    "dev:all": "bash scripts/dev-all.sh",
+    "desktop:dev": "pnpm --filter desktop tauri dev",
+    "dev:ws": "bash scripts/dev-web-server.sh",
+    "dev:full": "bash scripts/dev-full.sh"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.1"
+  }
+}

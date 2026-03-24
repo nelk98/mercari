@@ -1,0 +1,19 @@
+node_modules/
+**/node_modules/
+
+.DS_Store
+
+# Env files
+server/.env
+*.env.local
+
+# Build outputs
+web/dist/
+desktop/src-tauri/target/
+
+# Runtime data
+server/data.sqlite
+server/data.sqlite-shm
+server/data.sqlite-wal
+server/data/
+
