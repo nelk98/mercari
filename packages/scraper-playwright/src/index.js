@@ -89,12 +89,49 @@ const scrapeCards = async (page, sourceUrl) =>
 const defaultUserAgent =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'
 
+const userAgentPool = [
+  defaultUserAgent,
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+]
+
+const viewportPool = [
+  { width: 1280, height: 720 },
+  { width: 1366, height: 768 },
+  { width: 1440, height: 900 },
+  { width: 1536, height: 864 },
+]
+
+const pickRandom = (list) => list[Math.floor(Math.random() * list.length)]
+
+const buildContextOptions = (options, { rotateProfile } = {}) => {
+  const ua =
+    options.userAgent ||
+    (rotateProfile ? pickRandom(userAgentPool) : defaultUserAgent)
+  const viewport =
+    rotateProfile && !options.viewport ? pickRandom(viewportPool) : options.viewport || { width: 1280, height: 720 }
+  return {
+    locale: options.locale || 'ja-JP',
+    timezoneId: options.timezoneId || 'Asia/Tokyo',
+    userAgent: ua,
+    viewport,
+    ...(options.extraHTTPHeaders ? { extraHTTPHeaders: options.extraHTTPHeaders } : {}),
+  }
+}
+
 export const createScraperEngine = async (options = {}) => {
-  const browser = await chromium.launch({ headless: options.headless ?? true })
-  const context = await browser.newContext({
-    locale: 'ja-JP',
-    userAgent: options.userAgent || defaultUserAgent,
-  })
+  const launchOpts = { headless: options.headless ?? true }
+  if (options.proxyServer) {
+    launchOpts.proxy = { server: options.proxyServer }
+  }
+  const browser = await chromium.launch(launchOpts)
+
+  const freshContextPerScrape = Boolean(options.freshContextPerScrape)
+  let sharedContext = null
+  if (!freshContextPerScrape) {
+    sharedContext = await browser.newContext(buildContextOptions(options, { rotateProfile: false }))
+  }
 
   const scrapeOne = async (source, sourceOptions = {}) => {
     const sourceUrl = source?.url
@@ -106,7 +143,7 @@ export const createScraperEngine = async (options = {}) => {
     const retries = sourceOptions.retries ?? options.retries ?? 0
     let lastError = null
 
-    for (let attempt = 0; attempt <= retries; attempt += 1) {
+    const runInContext = async (context) => {
       const page = await context.newPage()
       try {
         await page.goto(sourceUrl, { waitUntil: 'domcontentloaded', timeout: timeoutMs })
@@ -115,10 +152,29 @@ export const createScraperEngine = async (options = {}) => {
         const normalized = rawItems.map((it) => normalizeItem(it, source.id))
         const valid = normalized.filter((it) => it.url && it.item_id)
         return dedupeItems(valid)
-      } catch (error) {
-        lastError = error
       } finally {
         await page.close().catch(() => {})
+      }
+    }
+
+    for (let attempt = 0; attempt <= retries; attempt += 1) {
+      if (freshContextPerScrape) {
+        const ctx = await browser.newContext(
+          buildContextOptions(options, { rotateProfile: true }),
+        )
+        try {
+          return await runInContext(ctx)
+        } catch (error) {
+          lastError = error
+        } finally {
+          await ctx.close().catch(() => {})
+        }
+      } else {
+        try {
+          return await runInContext(sharedContext)
+        } catch (error) {
+          lastError = error
+        }
       }
     }
 
@@ -128,7 +184,7 @@ export const createScraperEngine = async (options = {}) => {
   return {
     scrapeOne,
     close: async () => {
-      await context.close().catch(() => {})
+      await sharedContext?.close().catch(() => {})
       await browser.close().catch(() => {})
     },
   }

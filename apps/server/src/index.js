@@ -13,6 +13,8 @@ const boot = async () => {
     scrapeTimeoutMs: config.scrapeTimeoutMs,
     scrapeRetries: config.scrapeRetries,
     scrapeConcurrency: config.scrapeConcurrency,
+    scrapeFreshContext: config.scrapeFreshContext,
+    scrapeProxyServer: config.scrapeProxyServer,
   })
 
   const app = createApp({ store, scheduler })

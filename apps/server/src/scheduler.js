@@ -4,13 +4,24 @@ import { createScraperEngine } from '@mercari/scraper-playwright'
 const pickNextDelay = (minMs, maxMs) => Math.floor(Math.random() * (maxMs - minMs + 1)) + minMs
 
 export class ScrapeScheduler {
-  constructor({ store, intervalMinMs, intervalMaxMs, scrapeTimeoutMs = 12000, scrapeRetries = 0, scrapeConcurrency = 3 }) {
+  constructor({
+    store,
+    intervalMinMs,
+    intervalMaxMs,
+    scrapeTimeoutMs = 12000,
+    scrapeRetries = 0,
+    scrapeConcurrency = 3,
+    scrapeFreshContext = false,
+    scrapeProxyServer = null,
+  }) {
     this.store = store
     this.intervalMinMs = intervalMinMs
     this.intervalMaxMs = intervalMaxMs
     this.scrapeTimeoutMs = scrapeTimeoutMs
     this.scrapeRetries = scrapeRetries
     this.scrapeConcurrency = Math.max(1, scrapeConcurrency)
+    this.scrapeFreshContext = scrapeFreshContext
+    this.scrapeProxyServer = scrapeProxyServer
     this.timer = null
     this.running = false
   }
@@ -43,6 +54,8 @@ export class ScrapeScheduler {
       const engine = await createScraperEngine({
         timeoutMs: this.scrapeTimeoutMs,
         retries: this.scrapeRetries,
+        freshContextPerScrape: this.scrapeFreshContext,
+        ...(this.scrapeProxyServer ? { proxyServer: this.scrapeProxyServer } : {}),
       })
       const collected = []
       try {

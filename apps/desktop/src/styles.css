@@ -245,11 +245,37 @@ body[data-mode="widget"] .app {
   position: relative;
 }
 
+.widget-item-title {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  top: 8px;
+  z-index: 1;
+  padding: 6px 8px;
+  border-radius: 8px;
+  backdrop-filter: blur(10px);
+  background: rgba(10, 14, 25, 0.72);
+  color: #f0f4ff;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.3;
+  word-break: break-word;
+  display: block;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+.widget-item:hover .widget-item-title {
+  opacity: 1;
+}
+
 .widget-item-meta {
   position: absolute;
   left: 8px;
   right: 8px;
   bottom: 8px;
+  z-index: 2;
   display: flex;
   align-items: center;
   justify-content: flex-start;

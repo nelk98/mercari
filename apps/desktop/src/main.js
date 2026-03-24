@@ -293,8 +293,13 @@ const createWidgetView = () => {
           <span class="widget-item-meta">${priceText} <small>${timeText}</small></span>
         </div>
       `
+      const thumbEl = row.querySelector('.widget-item-thumb')
+      const titleEl = document.createElement('span')
+      titleEl.className = 'widget-item-title'
+      titleEl.textContent = item.title || '无标题'
+      thumbEl.prepend(titleEl)
       if (item.image) {
-        row.querySelector('.widget-item-thumb').style.backgroundImage = `url(${item.image})`
+        thumbEl.style.backgroundImage = `url(${item.image})`
       }
       row.addEventListener('click', async (event) => {
         event.stopPropagation()

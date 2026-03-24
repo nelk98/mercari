@@ -17,6 +17,15 @@ const scrapeTimeoutMs = clamp(number(process.env.SCRAPE_TIMEOUT_MS, 12000), 3000
 const scrapeRetries = clamp(number(process.env.SCRAPE_RETRIES, 0), 0, 3)
 const scrapeConcurrency = clamp(number(process.env.SCRAPE_CONCURRENCY, 3), 1, 8)
 
+const truthyEnv = (value) => {
+  if (value == null || value === '') return false
+  const v = String(value).trim().toLowerCase()
+  return v === '1' || v === 'true' || v === 'yes' || v === 'on'
+}
+
+const scrapeFreshContext = truthyEnv(process.env.SCRAPE_FRESH_CONTEXT)
+const scrapeProxyServer = (process.env.SCRAPE_PROXY_SERVER || '').trim() || null
+
 export const config = {
   port: number(process.env.PORT, DEFAULT_PORT),
   intervalMinMs: minInterval,
@@ -24,4 +33,6 @@ export const config = {
   scrapeTimeoutMs,
   scrapeRetries,
   scrapeConcurrency,
+  scrapeFreshContext,
+  scrapeProxyServer,
 }
