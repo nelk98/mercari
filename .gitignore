@@ -5,16 +5,17 @@ node_modules/
 
 # Env files
 server/.env
+apps/server/.env
 *.env.local
 
 # Build outputs
 web/dist/
 desktop/src-tauri/target/
+apps/desktop/src-tauri/target/
 
-# Runtime data
+# Runtime / local data（不入库）
 server/data.sqlite
 server/data.sqlite-shm
 server/data.sqlite-wal
 server/data/
-apps/server/data/items-*.json
-
+apps/server/data/
