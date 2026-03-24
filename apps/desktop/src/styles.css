@@ -227,6 +227,7 @@ body[data-mode="widget"] .app {
 .widget-item {
   display: block;
   padding: 0;
+  min-width: 0;
   aspect-ratio: 1 / 1;
   width: 100%;
   border-radius: 12px;

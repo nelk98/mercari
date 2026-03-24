@@ -223,6 +223,34 @@ const createWidgetView = () => {
     return Math.ceil(shellHeight + gap + feedHeight)
   }
 
+  const nextFrame = () => new Promise((resolve) => requestAnimationFrame(resolve))
+
+  /** 强制同步布局后再读高度，避免网格尚未完成排版时 scrollHeight 偏小导致窗口过矮、卡片堆叠 */
+  const flushLayoutAndWidgetHeight = () => {
+    void rootEl?.offsetHeight
+    void feedEl?.offsetWidth
+    void feedEl?.offsetHeight
+    return getWidgetHeightFromDom()
+  }
+
+  const syncWidgetWindowToContent = async () => {
+    if (isCollapsed) return
+    const h = flushLayoutAndWidgetHeight()
+    await resizeWidgetHeight(h)
+  }
+
+  let feedResizeRaf = null
+  const scheduleFeedResizeSync = () => {
+    if (isCollapsed) return
+    if (feedResizeRaf != null) cancelAnimationFrame(feedResizeRaf)
+    feedResizeRaf = requestAnimationFrame(async () => {
+      feedResizeRaf = null
+      await syncWidgetWindowToContent()
+    })
+  }
+
+  new ResizeObserver(() => scheduleFeedResizeSync()).observe(feedEl)
+
   const clearCollapseTimer = () => {
     if (!collapseTimer) return
     clearTimeout(collapseTimer)
@@ -258,9 +286,11 @@ const createWidgetView = () => {
     }
     isCollapsed = false
     await invokeResult('show_widget')
-    await resizeWidget(Math.max(EXPANDED_MIN_WIDTH, expandedWidth), 66)
-    await new Promise((resolve) => requestAnimationFrame(resolve))
-    await resizeWidgetHeight(getWidgetHeightFromDom())
+    const w = Math.max(EXPANDED_MIN_WIDTH, expandedWidth)
+    await resizeWidget(w, 66)
+    await nextFrame()
+    await nextFrame()
+    await syncWidgetWindowToContent()
     invoke('sync_widget_position')
     refreshDock()
     scheduleAutoCollapse()
@@ -311,9 +341,11 @@ const createWidgetView = () => {
       expandWidget()
       return
     }
-    requestAnimationFrame(() => {
-      resizeWidgetHeight(getWidgetHeightFromDom())
-    })
+    void (async () => {
+      await nextFrame()
+      await nextFrame()
+      await syncWidgetWindowToContent()
+    })()
     clearCollapseTimer()
   }
 

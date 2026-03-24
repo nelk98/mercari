@@ -1,5 +1,7 @@
 # Mercari Monitor（MVP 重构版）
 
+> **声明**：本仓库中的代码主要由 **人工智能（AI）辅助生成**。使用前请自行审查安全性、合规性、许可与可维护性；作者不对因使用本仓库而产生的任何后果承担责任。
+
 本仓库已重构为 `apps + packages` 的 monorepo，核心目标：
 
 - 统一使用 Playwright 抓取 Mercari 数据
