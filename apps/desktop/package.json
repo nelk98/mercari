@@ -1,0 +1,14 @@
+{
+  "name": "@mercari/desktop",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "tauri": "tauri",
+    "build": "echo \"desktop build via tauri\"",
+    "test": "echo \"desktop tests skipped\""
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

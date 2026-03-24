@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Mercari Monitor</title>
+    <script type="module" src="/main.js" defer></script>
+  </head>
+  <body>
+    <main id="app" class="app"></main>
+    <template id="main-template">
+      <section class="main-shell">
+        <header class="header">
+          <div class="title-group">
+            <h1>Mercari 监控</h1>
+            <p id="status-line">状态载入中...</p>
+          </div>
+          <div class="header-actions">
+            <button id="run-now" class="btn primary">立即抓取</button>
+            <button id="to-widget" class="btn ghost">精简模式</button>
+          </div>
+        </header>
+
+        <section class="compose">
+          <input id="source-name" placeholder="监控名称（可选）" />
+          <input id="source-url" placeholder="https://jp.mercari.com/search?keyword=..." />
+          <button id="source-add" class="btn primary">添加监控</button>
+        </section>
+
+        <section class="columns">
+          <article class="card">
+            <h2>监控源</h2>
+            <div id="sources" class="stack"></div>
+          </article>
+          <article class="card">
+            <h2>最新商品</h2>
+            <div id="items" class="stack items"></div>
+          </article>
+        </section>
+      </section>
+    </template>
+
+    <template id="widget-template">
+      <section class="widget-root">
+        <div class="widget-feed" id="widget-feed"></div>
+        <div class="widget-shell" id="widget-shell">
+          <div class="widget-middle">
+            <strong>Mercari 监控</strong>
+            <p id="widget-status">连接中...</p>
+          </div>
+          <div class="widget-right">
+            <button id="widget-clear" class="icon-btn" title="清空未读">✓</button>
+            <button id="widget-refresh" class="icon-btn" title="立即抓取">↻</button>
+            <button id="widget-open-main" class="icon-btn" title="打开主窗口">↗</button>
+          </div>
+        </div>
+      </section>
+    </template>
+  </body>
+</html>
