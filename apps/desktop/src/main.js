@@ -69,7 +69,32 @@ const request = async (url, options = {}) => {
     throw new Error(data.error || `${res.status}`)
   }
   if (res.status === 204) return null
-  return res.json()
+  return res.json().catch(() => ({}))
+}
+
+/** 订阅服务端 SSE：每完成一个监控源或整轮结束即通知（Tauri 跨源下可能不可用，故配合轮询） */
+const connectScrapeEvents = (onNotify) => {
+  try {
+    const es = new EventSource(`${API_BASE}/api/events`)
+    const bump = () => {
+      void onNotify()
+    }
+    es.addEventListener('scrape_progress', bump)
+    es.addEventListener('scrape_complete', bump)
+    es.addEventListener('scrape_error', bump)
+    es.addEventListener('scrape_skipped', bump)
+    es.onerror = () => {}
+    return () => es.close()
+  } catch (_) {
+    return () => {}
+  }
+}
+
+/** POST 抓取后服务端异步启动，补几次短间隔刷新以尽快进入 running 并拉到首批商品 */
+const scheduleDenseRefreshes = (fn, delaysMs = [0, 80, 200, 450, 900, 1600]) => {
+  for (const ms of delaysMs) {
+    setTimeout(() => void fn(), ms)
+  }
 }
 
 const createMainView = () => {
@@ -134,6 +159,14 @@ const createMainView = () => {
     }
   }
 
+  let mainScrapePollTimer = null
+  const stopMainScrapePoll = () => {
+    if (mainScrapePollTimer != null) {
+      clearInterval(mainScrapePollTimer)
+      mainScrapePollTimer = null
+    }
+  }
+
   const refresh = async () => {
     try {
       const [status, sources, items] = await Promise.all([
@@ -144,15 +177,26 @@ const createMainView = () => {
       statusLine.textContent = `状态：${status.state} | 上次：${formatHms(status.last_run_at)} | 下次：${formatHms(status.next_run_at)}`
       renderSources(sources)
       renderItems(items)
+      if (status.state === 'running') {
+        if (mainScrapePollTimer == null) {
+          mainScrapePollTimer = setInterval(() => void refresh(), 400)
+        }
+      } else {
+        stopMainScrapePoll()
+      }
     } catch (error) {
       statusLine.textContent = `离线：${error.message}`
+      stopMainScrapePoll()
     }
   }
 
   document.getElementById('run-now')?.addEventListener('click', async () => {
     await request('/api/scrape/run', { method: 'POST' })
+    scheduleDenseRefreshes(refresh)
     await refresh()
   })
+
+  connectScrapeEvents(refresh)
   document.getElementById('to-widget')?.addEventListener('click', () => invoke('show_widget'))
   document.getElementById('source-add')?.addEventListener('click', async () => {
     await request('/api/sources', {
@@ -215,17 +259,62 @@ const createWidgetView = () => {
     })
 
 
+  const WIDGET_ROOT_GAP = 8
+  const WIDGET_GRID_GAP = 6
+  const WIDGET_COLS = 2
+  const SCREEN_HEIGHT_CAP = 0.8
+
+  const getMaxWindowHeightPx = () =>
+    Math.max(160, Math.floor((window.screen?.availHeight || window.innerHeight) * SCREEN_HEIGHT_CAP))
+
+  /** 商品区最大高度：整体窗口不超过屏高 80%，减去 toolbar 与间距 */
+  const getMaxFeedHeightPx = () => {
+    const shellHeight = shellEl?.getBoundingClientRect().height || 66
+    return Math.max(100, getMaxWindowHeightPx() - shellHeight - WIDGET_ROOT_GAP)
+  }
+
+  const applyFeedMaxHeightVar = () => {
+    rootEl?.style.setProperty('--widget-feed-max', `${getMaxFeedHeightPx()}px`)
+  }
+
+  /** 按商品数量与窗口宽度估算所需窗口高度（避免先压成 66px 再量，导致数秒内网格堆叠） */
+  const estimateWindowHeightForItems = (itemCount, widthLogical) => {
+    const shellH = shellEl?.getBoundingClientRect().height || 66
+    if (itemCount <= 0) return Math.ceil(shellH)
+    const maxFeed = getMaxFeedHeightPx()
+    const rows = Math.ceil(itemCount / WIDGET_COLS)
+    const colW = (widthLogical - WIDGET_GRID_GAP) / WIDGET_COLS
+    const rowH = colW
+    const feedContentH = rows * rowH + Math.max(0, rows - 1) * WIDGET_GRID_GAP
+    const feedH = Math.min(feedContentH, maxFeed)
+    const h = Math.ceil(shellH + WIDGET_ROOT_GAP + feedH) + 2
+    return Math.min(h, getMaxWindowHeightPx())
+  }
+
   const getWidgetHeightFromDom = () => {
     const shellHeight = shellEl?.getBoundingClientRect().height || 66
-    if (!rootEl?.classList.contains('has-feed')) return Math.ceil(shellHeight)
-    const feedHeight = Math.min(feedEl?.scrollHeight || 0, 280)
-    const gap = 8
-    return Math.ceil(shellHeight + gap + feedHeight)
+    if (!rootEl?.classList.contains('has-feed')) {
+      return Math.min(Math.ceil(shellHeight), getMaxWindowHeightPx())
+    }
+    const feedCap = getMaxFeedHeightPx()
+    const feedHeight = Math.min(feedEl?.scrollHeight || 0, feedCap)
+    const h = Math.ceil(shellHeight + WIDGET_ROOT_GAP + feedHeight) + 2
+    return Math.min(h, getMaxWindowHeightPx())
   }
 
   const nextFrame = () => new Promise((resolve) => requestAnimationFrame(resolve))
 
-  /** 强制同步布局后再读高度，避免网格尚未完成排版时 scrollHeight 偏小导致窗口过矮、卡片堆叠 */
+  /** 与亚像素/舍入抖动区分，小于此差值不再调 Tauri 改窗口高度 */
+  const WIDGET_HEIGHT_COMMIT_EPS = 6
+  let lastCommittedWidgetHeight = null
+  let fitWidgetGeneration = 0
+
+  const resetWidgetSizeTracking = () => {
+    lastCommittedWidgetHeight = null
+    fitWidgetGeneration += 1
+  }
+
+  /** 强制同步布局后再读高度 */
   const flushLayoutAndWidgetHeight = () => {
     void rootEl?.offsetHeight
     void feedEl?.offsetWidth
@@ -236,20 +325,43 @@ const createWidgetView = () => {
   const syncWidgetWindowToContent = async () => {
     if (isCollapsed) return
     const h = flushLayoutAndWidgetHeight()
+    if (
+      lastCommittedWidgetHeight != null &&
+      Math.abs(h - lastCommittedWidgetHeight) < WIDGET_HEIGHT_COMMIT_EPS
+    ) {
+      return
+    }
+    lastCommittedWidgetHeight = h
     await resizeWidgetHeight(h)
   }
 
-  let feedResizeRaf = null
-  const scheduleFeedResizeSync = () => {
+  /** 一次设定宽度与足够的高度（公式 + DOM 微调），展开态专用 */
+  const fitWidgetWindow = async () => {
     if (isCollapsed) return
-    if (feedResizeRaf != null) cancelAnimationFrame(feedResizeRaf)
-    feedResizeRaf = requestAnimationFrame(async () => {
-      feedResizeRaf = null
-      await syncWidgetWindowToContent()
-    })
+    const gen = (fitWidgetGeneration += 1)
+    applyFeedMaxHeightVar()
+    const w = Math.max(EXPANDED_MIN_WIDTH, expandedWidth)
+    const n = unreadItems.length
+    const h = estimateWindowHeightForItems(n, w)
+    await resizeWidget(w, h)
+    if (gen !== fitWidgetGeneration) return
+    await nextFrame()
+    await nextFrame()
+    if (gen !== fitWidgetGeneration) return
+    await syncWidgetWindowToContent()
   }
 
-  new ResizeObserver(() => scheduleFeedResizeSync()).observe(feedEl)
+  /** 仅屏/视口变化时重算上限与高度，禁止再调 fitWidget（否则会与 Tauri 改窗尺寸形成 resize 回路抖动） */
+  let viewportResizeTimer = null
+  window.addEventListener('resize', () => {
+    if (isCollapsed) return
+    if (viewportResizeTimer != null) clearTimeout(viewportResizeTimer)
+    viewportResizeTimer = setTimeout(() => {
+      viewportResizeTimer = null
+      applyFeedMaxHeightVar()
+      void syncWidgetWindowToContent()
+    }, 200)
+  })
 
   const clearCollapseTimer = () => {
     if (!collapseTimer) return
@@ -273,6 +385,7 @@ const createWidgetView = () => {
     if (size?.width) {
       expandedWidth = Math.max(EXPANDED_MIN_WIDTH, size.width)
     }
+    resetWidgetSizeTracking()
     isCollapsed = true
     await invokeResult('hide_widget')
     refreshDock()
@@ -286,11 +399,7 @@ const createWidgetView = () => {
     }
     isCollapsed = false
     await invokeResult('show_widget')
-    const w = Math.max(EXPANDED_MIN_WIDTH, expandedWidth)
-    await resizeWidget(w, 66)
-    await nextFrame()
-    await nextFrame()
-    await syncWidgetWindowToContent()
+    await fitWidgetWindow()
     invoke('sync_widget_position')
     refreshDock()
     scheduleAutoCollapse()
@@ -303,6 +412,8 @@ const createWidgetView = () => {
       rootEl?.classList.remove('has-feed')
       if (clearBtn) clearBtn.disabled = true
       if (!isCollapsed) {
+        resetWidgetSizeTracking()
+        lastCommittedWidgetHeight = 66
         resizeWidgetHeight(66)
       }
       scheduleAutoCollapse()
@@ -341,11 +452,8 @@ const createWidgetView = () => {
       expandWidget()
       return
     }
-    void (async () => {
-      await nextFrame()
-      await nextFrame()
-      await syncWidgetWindowToContent()
-    })()
+    applyFeedMaxHeightVar()
+    void fitWidgetWindow()
     clearCollapseTimer()
   }
 
@@ -393,6 +501,14 @@ const createWidgetView = () => {
     return () => longPressed
   }
 
+  let widgetScrapePollTimer = null
+  const stopWidgetScrapePoll = () => {
+    if (widgetScrapePollTimer != null) {
+      clearInterval(widgetScrapePollTimer)
+      widgetScrapePollTimer = null
+    }
+  }
+
   const syncStatus = async () => {
     try {
       const [data, items] = await Promise.all([
@@ -405,8 +521,17 @@ const createWidgetView = () => {
 
       const unreadCountText = unreadItems.length > 0 ? `上新 ${unreadItems.length} 条` : '暂无未读'
       statusEl.textContent = `${data.state === 'online' ? '在线' : '更新中'} · ${formatHms(data.last_run_at)} · ${unreadCountText}`
+
+      if (data.state === 'running') {
+        if (widgetScrapePollTimer == null) {
+          widgetScrapePollTimer = setInterval(() => void syncStatus(), 400)
+        }
+      } else {
+        stopWidgetScrapePoll()
+      }
     } catch (_) {
       statusEl.textContent = '离线'
+      stopWidgetScrapePoll()
     }
   }
 
@@ -419,6 +544,7 @@ const createWidgetView = () => {
   })
   document.getElementById('widget-refresh')?.addEventListener('click', async () => {
     await request('/api/scrape/run', { method: 'POST' })
+    scheduleDenseRefreshes(syncStatus)
     await syncStatus()
     scheduleAutoCollapse()
   })
@@ -451,8 +577,9 @@ const createWidgetView = () => {
 
   refreshDock()
   invokeResult('hide_widget')
+  connectScrapeEvents(syncStatus)
   syncStatus()
-  setInterval(syncStatus, 4000)
+  setInterval(syncStatus, 2500)
   setInterval(refreshDock, 1500)
 }
 

@@ -13,6 +13,7 @@ export class ScrapeScheduler {
     scrapeConcurrency = 3,
     scrapeFreshContext = false,
     scrapeProxyServer = null,
+    broadcast = null,
   }) {
     this.store = store
     this.intervalMinMs = intervalMinMs
@@ -22,6 +23,8 @@ export class ScrapeScheduler {
     this.scrapeConcurrency = Math.max(1, scrapeConcurrency)
     this.scrapeFreshContext = scrapeFreshContext
     this.scrapeProxyServer = scrapeProxyServer
+    /** @type {((event: string, data: unknown) => void) | null} */
+    this.broadcast = typeof broadcast === 'function' ? broadcast : null
     this.timer = null
     this.running = false
   }
@@ -46,39 +49,69 @@ export class ScrapeScheduler {
   }
 
   async runOnce() {
-    if (this.running) return { skipped: true }
+    if (this.running) {
+      this.broadcast?.('scrape_skipped', { reason: 'already_running' })
+      return { skipped: true }
+    }
     this.running = true
     await this.store.setStatus({ state: 'running', message: '抓取中...' })
+    let totalInserted = 0
     try {
       const sources = (await this.store.listSources()).filter((item) => item.enabled === 1)
+      if (sources.length === 0) {
+        await this.store.setStatus({
+          state: 'online',
+          last_run_at: nowIso(),
+          message: '无启用监控源',
+        })
+        this.broadcast?.('scrape_complete', { inserted: 0, sources: 0 })
+        return { items: 0, inserted: 0 }
+      }
+
       const engine = await createScraperEngine({
         timeoutMs: this.scrapeTimeoutMs,
         retries: this.scrapeRetries,
         freshContextPerScrape: this.scrapeFreshContext,
         ...(this.scrapeProxyServer ? { proxyServer: this.scrapeProxyServer } : {}),
       })
-      const collected = []
       try {
-        const chunks = await this.runInPool(
+        await this.runInPool(
           sources,
-          async (source) => engine.scrapeOne(source, { timeoutMs: this.scrapeTimeoutMs, retries: this.scrapeRetries }),
+          async (source) => {
+            const items = await engine.scrapeOne(source, {
+              timeoutMs: this.scrapeTimeoutMs,
+              retries: this.scrapeRetries,
+            })
+            const ingest = await this.store.upsertScrapedItems(items)
+            totalInserted += ingest.inserted
+            const label = source.name || `源 #${source.id}`
+            await this.store.setStatus({
+              state: 'running',
+              message: `抓取中… ${label} 完成（本批 +${ingest.inserted}）`,
+            })
+            this.broadcast?.('scrape_progress', {
+              phase: 'source_done',
+              sourceId: source.id,
+              sourceName: source.name || '',
+              inserted: ingest.inserted,
+              itemCount: items.length,
+            })
+            return items
+          },
           this.scrapeConcurrency,
         )
-        for (const items of chunks) collected.push(...items)
       } finally {
         await engine.close()
       }
-      const sorted = collected
-        .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
-        .slice(0, 120)
-      const ingest = await this.store.upsertScrapedItems(sorted)
+
       await this.store.setStatus({
         state: 'online',
         last_run_at: nowIso(),
         consecutive_failures: 0,
-        message: `抓取完成，新增 ${ingest.inserted} 条`,
+        message: `抓取完成，新增 ${totalInserted} 条`,
       })
-      return { items: sorted.length, inserted: ingest.inserted }
+      this.broadcast?.('scrape_complete', { inserted: totalInserted, sources: sources.length })
+      return { inserted: totalInserted }
     } catch (error) {
       const state = await this.store.getState()
       await this.store.setStatus({
@@ -87,6 +120,7 @@ export class ScrapeScheduler {
         last_run_at: nowIso(),
         message: error?.message || '抓取失败',
       })
+      this.broadcast?.('scrape_error', { message: error?.message || 'scrape failed' })
       return { error: error?.message || 'scrape failed' }
     } finally {
       this.running = false

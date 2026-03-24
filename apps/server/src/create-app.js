@@ -14,13 +14,25 @@ const isMercariUrl = (value) => {
 const badRequest = (res, message) =>
   res.status(400).json({ error: message, code: ApiErrorCode.INVALID_INPUT })
 
-export const createApp = ({ store, scheduler }) => {
+export const createApp = ({ store, scheduler, eventHub }) => {
   const app = express()
   app.use(cors())
   app.use(express.json({ limit: '1mb' }))
 
   app.get('/healthz', (_req, res) => {
     res.json({ ok: true })
+  })
+
+  app.get('/api/events', (req, res) => {
+    req.socket.setTimeout(0)
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8')
+    res.setHeader('Cache-Control', 'no-cache, no-transform')
+    res.setHeader('Connection', 'keep-alive')
+    res.setHeader('X-Accel-Buffering', 'no')
+    if (typeof res.flushHeaders === 'function') res.flushHeaders()
+    const unsubscribe = eventHub.subscribe(res)
+    res.write(': connected\n\n')
+    req.on('close', unsubscribe)
   })
 
   app.get('/api/status', async (_req, res) => {
@@ -84,12 +96,11 @@ export const createApp = ({ store, scheduler }) => {
     return res.json({ ok: true, ...result })
   })
 
-  app.post('/api/scrape/run', async (_req, res) => {
-    const result = await scheduler.runOnce()
-    if (result.error) {
-      return res.status(500).json({ error: result.error, code: ApiErrorCode.SCRAPE_FAILED })
-    }
-    return res.json({ ok: true, ...result })
+  app.post('/api/scrape/run', (_req, res) => {
+    res.status(202).json({ ok: true, accepted: true })
+    scheduler.runOnce().catch((err) => {
+      eventHub.broadcast('scrape_error', { message: String(err?.message || err) })
+    })
   })
 
   return app

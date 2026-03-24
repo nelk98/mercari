@@ -3,9 +3,11 @@ import { config } from './config.js'
 import { Store } from './store.js'
 import { ScrapeScheduler } from './scheduler.js'
 import { createApp } from './create-app.js'
+import { createEventHub } from './event-hub.js'
 
 const boot = async () => {
   const store = new Store()
+  const eventHub = createEventHub()
   const scheduler = new ScrapeScheduler({
     store,
     intervalMinMs: config.intervalMinMs,
@@ -15,9 +17,10 @@ const boot = async () => {
     scrapeConcurrency: config.scrapeConcurrency,
     scrapeFreshContext: config.scrapeFreshContext,
     scrapeProxyServer: config.scrapeProxyServer,
+    broadcast: (event, data) => eventHub.broadcast(event, data),
   })
 
-  const app = createApp({ store, scheduler })
+  const app = createApp({ store, scheduler, eventHub })
   const server = http.createServer(app)
 
   server.listen(config.port, () => {

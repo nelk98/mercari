@@ -70,7 +70,7 @@ fn show_main(app: tauri::AppHandle) {
 fn show_widget(app: tauri::AppHandle) {
     if let Some(widget) = app.get_webview_window("widget") {
         let _ = widget.show();
-        let _ = widget.set_focus();
+        // Intentionally no set_focus: avoid stealing focus when the widget appears for new items.
     }
     if let Some(main) = app.get_webview_window("main") {
         let _ = main.hide();
