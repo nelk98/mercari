@@ -38,6 +38,34 @@
             <div id="items" class="stack items"></div>
           </article>
         </section>
+
+        <article class="card log-card">
+          <div class="log-toolbar">
+            <h2>抓取日志</h2>
+            <label class="log-date-label">
+              日期
+              <input type="date" id="log-day" />
+            </label>
+            <button type="button" id="log-refresh" class="btn ghost">刷新日志</button>
+          </div>
+          <p class="log-hint" id="log-hint">按日存储在本地，仅本机可见</p>
+          <div class="log-table-wrap">
+            <table class="log-table" aria-label="抓取日志">
+              <thead>
+                <tr>
+                  <th>时间</th>
+                  <th>状态</th>
+                  <th>上新</th>
+                  <th>条数</th>
+                  <th>耗时</th>
+                  <th>链接</th>
+                  <th>备注</th>
+                </tr>
+              </thead>
+              <tbody id="log-body"></tbody>
+            </table>
+          </div>
+        </article>
       </section>
     </template>
 

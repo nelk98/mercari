@@ -1,13 +1,16 @@
 import http from 'node:http'
+import path from 'node:path'
 import { config } from './config.js'
 import { Store } from './store.js'
 import { ScrapeScheduler } from './scheduler.js'
 import { createApp } from './create-app.js'
 import { createEventHub } from './event-hub.js'
+import { ScrapeLogger } from './scrape-log.js'
 
 const boot = async () => {
   const store = new Store()
   const eventHub = createEventHub()
+  const scrapeLog = new ScrapeLogger(path.resolve(process.cwd(), 'data'))
   const scheduler = new ScrapeScheduler({
     store,
     intervalMinMs: config.intervalMinMs,
@@ -15,12 +18,16 @@ const boot = async () => {
     scrapeTimeoutMs: config.scrapeTimeoutMs,
     scrapeRetries: config.scrapeRetries,
     scrapeConcurrency: config.scrapeConcurrency,
+    scrapeSequential: !config.scrapeConcurrent,
+    scrapeRoundBudgetMs: config.scrapeRoundBudgetMs,
+    scrapeStaggerGapMs: config.scrapeStaggerGapMs,
     scrapeFreshContext: config.scrapeFreshContext,
     scrapeProxyServer: config.scrapeProxyServer,
     broadcast: (event, data) => eventHub.broadcast(event, data),
+    scrapeLog,
   })
 
-  const app = createApp({ store, scheduler, eventHub })
+  const app = createApp({ store, scheduler, eventHub, scrapeLog })
   const server = http.createServer(app)
 
   server.listen(config.port, () => {

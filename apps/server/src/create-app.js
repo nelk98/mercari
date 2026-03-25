@@ -14,7 +14,7 @@ const isMercariUrl = (value) => {
 const badRequest = (res, message) =>
   res.status(400).json({ error: message, code: ApiErrorCode.INVALID_INPUT })
 
-export const createApp = ({ store, scheduler, eventHub }) => {
+export const createApp = ({ store, scheduler, eventHub, scrapeLog = null }) => {
   const app = express()
   app.use(cors())
   app.use(express.json({ limit: '1mb' }))
@@ -101,6 +101,15 @@ export const createApp = ({ store, scheduler, eventHub }) => {
     scheduler.runOnce().catch((err) => {
       eventHub.broadcast('scrape_error', { message: String(err?.message || err) })
     })
+  })
+
+  app.get('/api/scrape/logs', async (req, res) => {
+    if (!scrapeLog) return res.status(503).json({ error: 'scrape log disabled' })
+    const day = typeof req.query.day === 'string' ? req.query.day : undefined
+    const rawLimit = Number(req.query.limit)
+    const limit = Number.isFinite(rawLimit) ? rawLimit : 200
+    const { day: resolvedDay, logs } = await scrapeLog.readRecent({ day, limit })
+    res.json({ day: resolvedDay, logs })
   })
 
   return app

@@ -28,6 +28,27 @@ const formatAge = (input) => {
   return `${Math.floor(diffSec / 86400)}天前`
 }
 
+const escHtml = (s) =>
+  String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/"/g, '&quot;')
+
+const formatLogAt = (iso) => {
+  if (!iso) return '--'
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return escHtml(String(iso))
+  const p = (n) => String(n).padStart(2, '0')
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
+
+const scrapeLogStatusUi = (status) => {
+  if (status === 'ok') return { text: '成功', cls: 'ok' }
+  if (status === 'error') return { text: '失败', cls: 'error' }
+  if (status === 'skipped') return { text: '跳过', cls: 'skipped' }
+  return { text: escHtml(status || '—'), cls: '' }
+}
+
 const copyToClipboard = async (text) => {
   if (!text) return
   try {
@@ -107,6 +128,59 @@ const createMainView = () => {
   const itemsEl = document.getElementById('items')
   const nameInput = document.getElementById('source-name')
   const urlInput = document.getElementById('source-url')
+  const logDayInput = document.getElementById('log-day')
+  const logHintEl = document.getElementById('log-hint')
+  const logBodyEl = document.getElementById('log-body')
+
+  const todayStr = new Date().toISOString().slice(0, 10)
+  if (logDayInput && !logDayInput.value) logDayInput.value = todayStr
+
+  const renderScrapeLogs = (logs = []) => {
+    if (!logBodyEl) return
+    if (!logs.length) {
+      logBodyEl.innerHTML = '<tr><td colspan="7">暂无记录</td></tr>'
+      return
+    }
+    logBodyEl.innerHTML = logs
+      .map((row) => {
+        const st = scrapeLogStatusUi(row.status)
+        const time = formatLogAt(row.at)
+        const url = escHtml(row.url || '')
+        const err = escHtml(row.error || '')
+        const dur = row.duration_ms != null ? `${Number(row.duration_ms)} ms` : '—'
+        const ins = row.inserted ?? 0
+        const cnt = row.item_count ?? 0
+        return `<tr>
+          <td class="col-time">${time}</td>
+          <td><span class="log-status ${st.cls}">${st.text}</span></td>
+          <td class="col-num">${ins}</td>
+          <td class="col-num">${cnt}</td>
+          <td class="col-num">${dur}</td>
+          <td class="col-url" title="${url}">${url}</td>
+          <td class="col-err">${err || '—'}</td>
+        </tr>`
+      })
+      .join('')
+  }
+
+  let lastLogFetchAt = 0
+  const loadScrapeLogs = async (force = false) => {
+    if (!logDayInput || !logBodyEl) return
+    if (!force && Date.now() - lastLogFetchAt < 1400) return
+    lastLogFetchAt = Date.now()
+    const day = logDayInput.value || todayStr
+    try {
+      const q = new URLSearchParams({ day, limit: '200' })
+      const data = await request(`/api/scrape/logs?${q}`)
+      renderScrapeLogs(data.logs || [])
+      if (logHintEl) {
+        logHintEl.textContent = `当日 ${data.day || day} · 共 ${(data.logs || []).length} 条（本地文件，不入库 Git）`
+      }
+    } catch (e) {
+      if (logHintEl) logHintEl.textContent = `日志加载失败：${e.message}`
+      renderScrapeLogs([])
+    }
+  }
 
   const renderSources = (sources = []) => {
     sourcesEl.innerHTML = ''
@@ -188,6 +262,7 @@ const createMainView = () => {
       statusLine.textContent = `离线：${error.message}`
       stopMainScrapePoll()
     }
+    void loadScrapeLogs(false)
   }
 
   document.getElementById('run-now')?.addEventListener('click', async () => {
@@ -208,6 +283,9 @@ const createMainView = () => {
     urlInput.value = ''
     await refresh()
   })
+
+  logDayInput?.addEventListener('change', () => void loadScrapeLogs(true))
+  document.getElementById('log-refresh')?.addEventListener('click', () => void loadScrapeLogs(true))
 
   refresh()
   setInterval(refresh, 5000)

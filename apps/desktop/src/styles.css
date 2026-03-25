@@ -25,6 +25,11 @@ body {
   padding: 12px;
 }
 
+body[data-mode='main'] .app {
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
 .main-shell {
   display: flex;
   flex-direction: column;
@@ -103,6 +108,128 @@ input {
   grid-template-columns: 320px minmax(0, 1fr);
   gap: 12px;
   min-height: 0;
+}
+
+.log-card {
+  flex: 0 0 auto;
+  max-height: min(38vh, 320px);
+  min-height: 140px;
+}
+
+.log-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
+.log-toolbar h2 {
+  margin: 0;
+  margin-right: auto;
+  font-size: 14px;
+}
+
+.log-date-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #99abd6;
+}
+
+.log-date-label input[type='date'] {
+  max-width: 150px;
+}
+
+.log-hint {
+  margin: 0 0 8px;
+  font-size: 11px;
+  color: #6a7aa8;
+}
+
+.log-table-wrap {
+  overflow: auto;
+  min-height: 0;
+  flex: 1;
+  border-radius: 10px;
+  border: 1px solid rgba(141, 169, 236, 0.2);
+}
+
+.log-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.log-table th,
+.log-table td {
+  padding: 6px 8px;
+  text-align: left;
+  border-bottom: 1px solid rgba(141, 169, 236, 0.12);
+  vertical-align: top;
+}
+
+.log-table th {
+  position: sticky;
+  top: 0;
+  background: rgba(28, 38, 62, 0.98);
+  color: #b4c4ee;
+  font-weight: 700;
+  z-index: 1;
+}
+
+.log-table td {
+  color: #c8d4f0;
+  word-break: break-word;
+}
+
+.log-table .col-time {
+  white-space: nowrap;
+  width: 1%;
+}
+
+.log-table .col-num {
+  white-space: nowrap;
+  width: 1%;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.log-table .col-url {
+  max-width: 220px;
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+  color: #9eb4e8;
+}
+
+.log-table .col-err {
+  max-width: 180px;
+  color: #ff9e9e;
+  font-size: 10px;
+}
+
+.log-status {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: 6px;
+  font-weight: 700;
+  font-size: 10px;
+}
+
+.log-status.ok {
+  background: rgba(46, 160, 90, 0.35);
+  color: #b8f5cf;
+}
+
+.log-status.error {
+  background: rgba(200, 60, 60, 0.35);
+  color: #ffc4c4;
+}
+
+.log-status.skipped {
+  background: rgba(140, 140, 80, 0.35);
+  color: #f0e8a8;
 }
 
 .card {

@@ -139,7 +139,7 @@ export const createScraperEngine = async (options = {}) => {
       throw new ScrapeError('INVALID_INPUT', 'source.url is required')
     }
 
-    const timeoutMs = sourceOptions.timeoutMs ?? options.timeoutMs ?? 12000
+    const timeoutMs = sourceOptions.timeoutMs ?? options.timeoutMs ?? 30000
     const retries = sourceOptions.retries ?? options.retries ?? 0
     let lastError = null
 
@@ -147,7 +147,7 @@ export const createScraperEngine = async (options = {}) => {
       const page = await context.newPage()
       try {
         await page.goto(sourceUrl, { waitUntil: 'domcontentloaded', timeout: timeoutMs })
-        await page.waitForSelector(READY_SELECTOR, { timeout: Math.min(timeoutMs, 5000) }).catch(() => {})
+        await page.waitForSelector(READY_SELECTOR, { timeout: Math.min(timeoutMs, 25000) }).catch(() => {})
         const rawItems = await scrapeCards(page, sourceUrl)
         const normalized = rawItems.map((it) => normalizeItem(it, source.id))
         const valid = normalized.filter((it) => it.url && it.item_id)

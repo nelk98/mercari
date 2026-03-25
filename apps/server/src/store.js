@@ -30,7 +30,26 @@ const dayFromIso = (iso) => {
 
 const dayFile = (day) => path.resolve(DATA_DIR, `items-${day}.json`)
 
-const makeItemKey = (item) => `${item?.source_id || ''}${KEY_DELIMITER}${item?.item_id || item?.url || ''}`
+/** 煤炉商品 ID：多订阅同一商品时合并为一条，已读状态才能共用 */
+const extractMercariItemId = (item) => {
+  const id = String(item?.item_id || '').trim()
+  if (id && /^[a-zA-Z0-9_-]+$/.test(id)) return id
+  const url = String(item?.url || '')
+  try {
+    const u = new URL(url, 'https://jp.mercari.com')
+    const m = u.pathname.match(/\/item\/([^/?#]+)/)
+    if (m?.[1]) return m[1]
+  } catch (_) {}
+  return ''
+}
+
+const makeItemKey = (item) => {
+  const mid = extractMercariItemId(item)
+  if (mid) return `item${KEY_DELIMITER}${mid}`
+  const sid = item?.source_id ?? ''
+  const u = String(item?.url || '')
+  return `${sid}${KEY_DELIMITER}${u || 'noval'}`
+}
 
 const readJson = async (file, fallback) => {
   try {
@@ -193,7 +212,12 @@ export class Store {
     for (const day of recentDays) {
       const rows = await this.readDayItems(day)
       for (const row of rows) {
-        if (row?.key) keyDayMap.set(row.key, day)
+        if (row?.key && !keyDayMap.has(row.key)) keyDayMap.set(row.key, day)
+        const rid = extractMercariItemId(row)
+        if (rid) {
+          const ck = `item${KEY_DELIMITER}${rid}`
+          if (!keyDayMap.has(ck)) keyDayMap.set(ck, day)
+        }
       }
     }
 
@@ -201,10 +225,26 @@ export class Store {
     for (const item of incoming) {
       const key = makeItemKey(item)
       if (!key || !item.url) continue
+      const mercariId = extractMercariItemId(item)
       const mapped = keyDayMap.get(key)
+
       if (!mapped) {
         const day = dayFromIso(now)
         const dayItems = await getDayItems(day)
+        const dup = mercariId
+          ? dayItems.find((row) => extractMercariItemId(row) === mercariId)
+          : null
+        if (dup) {
+          if (key.startsWith(`item${KEY_DELIMITER}`) && dup.key !== key) dup.key = key
+          dup.title = item.title || dup.title
+          dup.price = item.price || dup.price
+          dup.image = item.image || dup.image
+          dup.url = item.url || dup.url
+          dup.source_id = item.source_id ?? dup.source_id
+          dup.published_at = item.published_at || dup.published_at || null
+          dup.last_seen_at = now
+          continue
+        }
         dayItems.push({
           ...item,
           key,
@@ -213,17 +253,24 @@ export class Store {
           read_at: null,
         })
         keyDayMap.set(key, day)
+        if (mercariId) keyDayMap.set(`item${KEY_DELIMITER}${mercariId}`, day)
         inserted += 1
         continue
       }
 
       const dayItems = await getDayItems(mapped)
-      const target = dayItems.find((row) => row.key === key)
+      let target =
+        mercariId != null && mercariId !== ''
+          ? dayItems.find((row) => extractMercariItemId(row) === mercariId)
+          : dayItems.find((row) => row.key === key)
       if (!target) continue
+      if (key.startsWith(`item${KEY_DELIMITER}`) && target.key !== key) target.key = key
       target.title = item.title || target.title
       target.price = item.price || target.price
       target.image = item.image || target.image
       target.url = item.url || target.url
+      target.source_id = item.source_id ?? target.source_id
+      target.item_id = mercariId || target.item_id
       target.published_at = item.published_at || target.published_at || null
       target.last_seen_at = now
     }
@@ -237,7 +284,16 @@ export class Store {
 
   async markItemsRead({ all = false, keys = [] } = {}) {
     const now = nowIso()
-    const targetKeys = all ? null : new Set(Array.isArray(keys) ? keys : [])
+    const rawKeys = Array.isArray(keys) ? keys : []
+    const targetKeys = all ? null : new Set(rawKeys)
+    if (!all && targetKeys) {
+      for (const k of rawKeys) {
+        const m = String(k).match(/^(\d+)::(.+)$/)
+        if (m?.[2] && /^[a-zA-Z0-9_-]+$/.test(m[2])) {
+          targetKeys.add(`item${KEY_DELIMITER}${m[2]}`)
+        }
+      }
+    }
     const days = await this.listRecentDayKeys(60)
 
     let marked = 0
@@ -245,7 +301,13 @@ export class Store {
       const rows = await this.readDayItems(day)
       let changed = false
       for (const row of rows) {
-        if (!all && !targetKeys?.has(row.key)) continue
+        if (!all) {
+          const rk = row.key
+          const mid = extractMercariItemId(row)
+          const canon = mid ? `item${KEY_DELIMITER}${mid}` : null
+          const hit = targetKeys?.has(rk) || (canon != null && targetKeys?.has(canon))
+          if (!hit) continue
+        }
         if (!row.read_at) marked += 1
         row.read_at = now
         changed = true

@@ -1,7 +1,11 @@
+import { randomUUID } from 'node:crypto'
 import { nowIso } from '@mercari/shared'
 import { createScraperEngine } from '@mercari/scraper-playwright'
+import { toDisplayUrl } from './scrape-log.js'
 
 const pickNextDelay = (minMs, maxMs) => Math.floor(Math.random() * (maxMs - minMs + 1)) + minMs
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 export class ScrapeScheduler {
   constructor({
@@ -11,9 +15,13 @@ export class ScrapeScheduler {
     scrapeTimeoutMs = 12000,
     scrapeRetries = 0,
     scrapeConcurrency = 3,
+    scrapeSequential = true,
+    scrapeRoundBudgetMs = 30000,
+    scrapeStaggerGapMs = 180,
     scrapeFreshContext = false,
     scrapeProxyServer = null,
     broadcast = null,
+    scrapeLog = null,
   }) {
     this.store = store
     this.intervalMinMs = intervalMinMs
@@ -21,10 +29,14 @@ export class ScrapeScheduler {
     this.scrapeTimeoutMs = scrapeTimeoutMs
     this.scrapeRetries = scrapeRetries
     this.scrapeConcurrency = Math.max(1, scrapeConcurrency)
+    this.scrapeSequential = Boolean(scrapeSequential)
+    this.scrapeRoundBudgetMs = scrapeRoundBudgetMs
+    this.scrapeStaggerGapMs = scrapeStaggerGapMs
     this.scrapeFreshContext = scrapeFreshContext
     this.scrapeProxyServer = scrapeProxyServer
     /** @type {((event: string, data: unknown) => void) | null} */
     this.broadcast = typeof broadcast === 'function' ? broadcast : null
+    this.scrapeLog = scrapeLog || null
     this.timer = null
     this.running = false
   }
@@ -54,11 +66,26 @@ export class ScrapeScheduler {
       return { skipped: true }
     }
     this.running = true
+    const runId = randomUUID()
+    const runStartedAt = Date.now()
     await this.store.setStatus({ state: 'running', message: '抓取中...' })
     let totalInserted = 0
     try {
       const sources = (await this.store.listSources()).filter((item) => item.enabled === 1)
       if (sources.length === 0) {
+        await this.scrapeLog?.append({
+          at: nowIso(),
+          run_id: runId,
+          url: '(无启用监控源)',
+          url_raw: '',
+          source_id: null,
+          source_name: '',
+          inserted: 0,
+          item_count: 0,
+          status: 'skipped',
+          duration_ms: Date.now() - runStartedAt,
+          error: null,
+        })
         await this.store.setStatus({
           state: 'online',
           last_run_at: nowIso(),
@@ -75,16 +102,32 @@ export class ScrapeScheduler {
         ...(this.scrapeProxyServer ? { proxyServer: this.scrapeProxyServer } : {}),
       })
       try {
-        await this.runInPool(
-          sources,
-          async (source) => {
+        const processSource = async (source, timeoutMs) => {
+          const label = source.name || `源 #${source.id}`
+          const urlRaw = String(source.url || '')
+          const urlDisplay = toDisplayUrl(urlRaw)
+          const t0 = Date.now()
+          try {
             const items = await engine.scrapeOne(source, {
-              timeoutMs: this.scrapeTimeoutMs,
+              timeoutMs,
               retries: this.scrapeRetries,
             })
             const ingest = await this.store.upsertScrapedItems(items)
             totalInserted += ingest.inserted
-            const label = source.name || `源 #${source.id}`
+            const durationMs = Date.now() - t0
+            await this.scrapeLog?.append({
+              at: nowIso(),
+              run_id: runId,
+              url: urlDisplay,
+              url_raw: urlRaw,
+              source_id: source.id,
+              source_name: source.name || '',
+              inserted: ingest.inserted,
+              item_count: items.length,
+              status: 'ok',
+              duration_ms: durationMs,
+              error: null,
+            })
             await this.store.setStatus({
               state: 'running',
               message: `抓取中… ${label} 完成（本批 +${ingest.inserted}）`,
@@ -97,9 +140,55 @@ export class ScrapeScheduler {
               itemCount: items.length,
             })
             return items
-          },
-          this.scrapeConcurrency,
-        )
+          } catch (err) {
+            const msg = err?.message || String(err)
+            const durationMs = Date.now() - t0
+            // eslint-disable-next-line no-console
+            console.error(`[scheduler] source ${source.id} ${label}`, err)
+            await this.scrapeLog?.append({
+              at: nowIso(),
+              run_id: runId,
+              url: urlDisplay,
+              url_raw: urlRaw,
+              source_id: source.id,
+              source_name: source.name || '',
+              inserted: 0,
+              item_count: 0,
+              status: 'error',
+              duration_ms: durationMs,
+              error: msg,
+            })
+            await this.store.setStatus({
+              state: 'running',
+              message: `抓取中… ${label} 失败（已跳过，继续其他源）：${msg}`,
+            })
+            this.broadcast?.('scrape_progress', {
+              phase: 'source_error',
+              sourceId: source.id,
+              sourceName: source.name || '',
+              error: msg,
+              itemCount: 0,
+              inserted: 0,
+            })
+            return []
+          }
+        }
+
+        if (this.scrapeSequential) {
+          const gap = Math.max(0, this.scrapeStaggerGapMs)
+          // 单源超时使用完整 SCRAPE_TIMEOUT_MS；不再用「轮次预算」压短超时（否则易误判失败、条数为 0）
+          const perSourceTimeout = this.scrapeTimeoutMs
+          for (let i = 0; i < sources.length; i += 1) {
+            if (i > 0 && gap > 0) await sleep(gap)
+            await processSource(sources[i], perSourceTimeout)
+          }
+        } else {
+          await this.runInPool(
+            sources,
+            (source) => processSource(source, this.scrapeTimeoutMs),
+            this.scrapeConcurrency,
+          )
+        }
       } finally {
         await engine.close()
       }
@@ -113,15 +202,29 @@ export class ScrapeScheduler {
       this.broadcast?.('scrape_complete', { inserted: totalInserted, sources: sources.length })
       return { inserted: totalInserted }
     } catch (error) {
+      const msg = error?.message || String(error)
+      await this.scrapeLog?.append({
+        at: nowIso(),
+        run_id: runId,
+        url: '(整轮异常)',
+        url_raw: '',
+        source_id: null,
+        source_name: '',
+        inserted: 0,
+        item_count: 0,
+        status: 'error',
+        duration_ms: Date.now() - runStartedAt,
+        error: msg,
+      })
       const state = await this.store.getState()
       await this.store.setStatus({
         state: 'degraded',
         consecutive_failures: (state.status?.consecutive_failures || 0) + 1,
         last_run_at: nowIso(),
-        message: error?.message || '抓取失败',
+        message: msg || '抓取失败',
       })
-      this.broadcast?.('scrape_error', { message: error?.message || 'scrape failed' })
-      return { error: error?.message || 'scrape failed' }
+      this.broadcast?.('scrape_error', { message: msg || 'scrape failed' })
+      return { error: msg || 'scrape failed' }
     } finally {
       this.running = false
     }
@@ -131,9 +234,17 @@ export class ScrapeScheduler {
     const delay = pickNextDelay(this.intervalMinMs, this.intervalMaxMs)
     const nextRunAt = new Date(Date.now() + delay).toISOString()
     this.store.setStatus({ next_run_at: nextRunAt }).catch(() => {})
-    this.timer = setTimeout(async () => {
-      await this.runOnce()
-      this.scheduleNext()
+    this.timer = setTimeout(() => {
+      void (async () => {
+        try {
+          await this.runOnce()
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.error('[scheduler] runOnce threw', err)
+        } finally {
+          this.scheduleNext()
+        }
+      })()
     }, delay)
   }
 
