@@ -21,8 +21,12 @@ const boot = async () => {
     scrapeSequential: !config.scrapeConcurrent,
     scrapeRoundBudgetMs: config.scrapeRoundBudgetMs,
     scrapeStaggerGapMs: config.scrapeStaggerGapMs,
+    scrapePostRefreshWaitMs: config.scrapePostRefreshWaitMs,
     scrapeFreshContext: config.scrapeFreshContext,
+    scrapePlaywrightHeaded: config.scrapePlaywrightHeaded,
+    scrapeSoftMercariRefresh: config.scrapeSoftMercariRefresh,
     scrapeProxyServer: config.scrapeProxyServer,
+    scrapePlaywrightChannel: config.scrapePlaywrightChannel,
     broadcast: (event, data) => eventHub.broadcast(event, data),
     scrapeLog,
   })
@@ -37,8 +41,9 @@ const boot = async () => {
 
   scheduler.start()
 
-  const shutdown = () => {
+  const shutdown = async () => {
     scheduler.stop()
+    await scheduler.disposeScraperEngine()
     server.close(() => process.exit(0))
   }
   process.on('SIGINT', shutdown)

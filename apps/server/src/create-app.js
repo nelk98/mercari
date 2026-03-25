@@ -103,6 +103,39 @@ export const createApp = ({ store, scheduler, eventHub, scrapeLog = null }) => {
     })
   })
 
+  /**
+   * 启用/关闭 Playwright 有头模式，关闭当前引擎以便下轮生效。
+   * body.headed === false 时仅关有头；否则开启有头并异步触发一轮抓取（便于托盘「显示抓取浏览器」）。
+   */
+  app.post('/api/scrape/playwright-visual', async (req, res) => {
+    const headed = req.body?.headed !== false
+    scheduler.setPlaywrightHeaded(headed)
+    await scheduler.disposeScraperEngine()
+    if (headed) {
+      res.status(202).json({ ok: true, headed: true, scrapeStarted: true })
+      scheduler.runOnce().catch((err) => {
+        eventHub.broadcast('scrape_error', { message: String(err?.message || err) })
+      })
+    } else {
+      res.json({ ok: true, headed: false, scrapeStarted: false })
+    }
+  })
+
+  /** 托盘单项切换：有头 ↔ 无头；切到有头时释放引擎并立即跑一轮抓取 */
+  app.post('/api/scrape/playwright-visual/toggle', async (_req, res) => {
+    const next = !scheduler.playwrightHeaded
+    scheduler.setPlaywrightHeaded(next)
+    await scheduler.disposeScraperEngine()
+    if (next) {
+      res.status(202).json({ ok: true, headed: true, scrapeStarted: true })
+      scheduler.runOnce().catch((err) => {
+        eventHub.broadcast('scrape_error', { message: String(err?.message || err) })
+      })
+    } else {
+      res.json({ ok: true, headed: false, scrapeStarted: false })
+    }
+  })
+
   app.get('/api/scrape/logs', async (req, res) => {
     if (!scrapeLog) return res.status(503).json({ error: 'scrape log disabled' })
     const day = typeof req.query.day === 'string' ? req.query.day : undefined

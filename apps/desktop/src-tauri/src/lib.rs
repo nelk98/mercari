@@ -2,6 +2,29 @@ use tauri::{Emitter, Manager};
 use tauri::{LogicalSize, PhysicalPosition, Position};
 use tauri_plugin_global_shortcut::{Code, Modifiers, ShortcutState};
 use serde::Serialize;
+use serde_json::json;
+
+/// 与桌面 `main.js` 中 API 默认端口一致（若改 PORT 需同步）
+const SCRAPE_SERVER_ORIGIN: &str = "http://127.0.0.1:2999";
+
+fn post_playwright_visual_toggle() {
+    let url = format!("{SCRAPE_SERVER_ORIGIN}/api/scrape/playwright-visual/toggle");
+    match ureq::post(&url)
+        .set("Content-Type", "application/json")
+        .timeout(std::time::Duration::from_secs(8))
+        .send_json(json!({}))
+    {
+        Ok(resp) => {
+            if !(200..300).contains(&resp.status()) {
+                eprintln!(
+                    "[tray] playwright visual toggle: HTTP {}",
+                    resp.status()
+                );
+            }
+        }
+        Err(err) => eprintln!("[tray] playwright visual toggle: {err}"),
+    }
+}
 
 fn clamp(start: i32, size: i32, min: i32, max: i32) -> i32 {
     let max_start = max - size;
@@ -303,8 +326,23 @@ pub fn run() {
                 MenuItem::with_id(app, "show_main", "Show Main Window", true, None::<&str>)?;
             let show_widget_item =
                 MenuItem::with_id(app, "show_widget", "Show Widget Window", true, None::<&str>)?;
+            let playwright_toggle_item = MenuItem::with_id(
+                app,
+                "playwright_visual_toggle",
+                "切换抓取浏览器显示（开/关）",
+                true,
+                None::<&str>,
+            )?;
             let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show_main_item, &show_widget_item, &quit_item])?;
+            let menu = Menu::with_items(
+                app,
+                &[
+                    &show_main_item,
+                    &show_widget_item,
+                    &playwright_toggle_item,
+                    &quit_item,
+                ],
+            )?;
             let icon = app.default_window_icon().cloned().expect("icon not found");
 
             TrayIconBuilder::new()
@@ -314,6 +352,7 @@ pub fn run() {
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "show_main" => show_main(app.clone()),
                     "show_widget" => show_widget(app.clone()),
+                    "playwright_visual_toggle" => post_playwright_visual_toggle(),
                     "quit" => app.exit(0),
                     _ => {}
                 })

@@ -104,6 +104,7 @@ const connectScrapeEvents = (onNotify) => {
     es.addEventListener('scrape_complete', bump)
     es.addEventListener('scrape_error', bump)
     es.addEventListener('scrape_skipped', bump)
+    es.addEventListener('playwright_browser_closed', bump)
     es.onerror = () => {}
     return () => es.close()
   } catch (_) {

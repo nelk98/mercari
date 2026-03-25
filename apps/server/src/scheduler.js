@@ -19,7 +19,11 @@ export class ScrapeScheduler {
     scrapeRoundBudgetMs = 30000,
     scrapeStaggerGapMs = 180,
     scrapeFreshContext = false,
+    scrapePlaywrightHeaded = false,
+    scrapeSoftMercariRefresh = true,
     scrapeProxyServer = null,
+    scrapePlaywrightChannel = null,
+    scrapePostRefreshWaitMs = 2500,
     broadcast = null,
     scrapeLog = null,
   }) {
@@ -33,12 +37,31 @@ export class ScrapeScheduler {
     this.scrapeRoundBudgetMs = scrapeRoundBudgetMs
     this.scrapeStaggerGapMs = scrapeStaggerGapMs
     this.scrapeFreshContext = scrapeFreshContext
+    /** @type {boolean} 为 true 时 chromium.launch({ headless: false }) */
+    this.playwrightHeaded = Boolean(scrapePlaywrightHeaded)
+    this.scrapeSoftMercariRefresh = scrapeSoftMercariRefresh
     this.scrapeProxyServer = scrapeProxyServer
+    this.scrapePlaywrightChannel = scrapePlaywrightChannel
+    this.scrapePostRefreshWaitMs = Math.max(0, scrapePostRefreshWaitMs)
     /** @type {((event: string, data: unknown) => void) | null} */
     this.broadcast = typeof broadcast === 'function' ? broadcast : null
     this.scrapeLog = scrapeLog || null
     this.timer = null
     this.running = false
+    /** @type {Awaited<ReturnType<typeof createScraperEngine>> | null} */
+    this.scraperEngine = null
+  }
+
+  async disposeScraperEngine() {
+    if (!this.scraperEngine) return
+    const engine = this.scraperEngine
+    this.scraperEngine = null
+    await engine.close().catch(() => {})
+  }
+
+  /** 下次创建的引擎是否使用有头浏览器 */
+  setPlaywrightHeaded(headed) {
+    this.playwrightHeaded = Boolean(headed)
   }
 
   async runInPool(items, worker, concurrency) {
@@ -95,12 +118,23 @@ export class ScrapeScheduler {
         return { items: 0, inserted: 0 }
       }
 
-      const engine = await createScraperEngine({
-        timeoutMs: this.scrapeTimeoutMs,
-        retries: this.scrapeRetries,
-        freshContextPerScrape: this.scrapeFreshContext,
-        ...(this.scrapeProxyServer ? { proxyServer: this.scrapeProxyServer } : {}),
-      })
+      if (!this.scraperEngine) {
+        this.scraperEngine = await createScraperEngine({
+          headless: !this.playwrightHeaded,
+          timeoutMs: this.scrapeTimeoutMs,
+          retries: this.scrapeRetries,
+          freshContextPerScrape: this.scrapeFreshContext,
+          softMercariRefresh: this.scrapeSoftMercariRefresh,
+          ...(this.scrapeProxyServer ? { proxyServer: this.scrapeProxyServer } : {}),
+          ...(this.scrapePlaywrightChannel ? { channel: this.scrapePlaywrightChannel } : {}),
+          onBrowserDisconnected: () => {
+            this.scraperEngine = null
+            this.broadcast?.('playwright_browser_closed', { reason: 'disconnected' })
+          },
+        })
+      }
+      const engine = this.scraperEngine
+
       try {
         const processSource = async (source, timeoutMs) => {
           const label = source.name || `源 #${source.id}`
@@ -111,6 +145,7 @@ export class ScrapeScheduler {
             const items = await engine.scrapeOne(source, {
               timeoutMs,
               retries: this.scrapeRetries,
+              softMercariRefresh: this.scrapeSoftMercariRefresh,
             })
             const ingest = await this.store.upsertScrapedItems(items)
             totalInserted += ingest.inserted
@@ -174,9 +209,139 @@ export class ScrapeScheduler {
           }
         }
 
-        if (this.scrapeSequential) {
+        const processSourceReadList = async (source, timeoutMs) => {
+          const label = source.name || `源 #${source.id}`
+          const urlRaw = String(source.url || '')
+          const urlDisplay = toDisplayUrl(urlRaw)
+          const t0 = Date.now()
+          try {
+            const items = await engine.readSourceList(source, { timeoutMs })
+            const ingest = await this.store.upsertScrapedItems(items)
+            totalInserted += ingest.inserted
+            const durationMs = Date.now() - t0
+            await this.scrapeLog?.append({
+              at: nowIso(),
+              run_id: runId,
+              url: urlDisplay,
+              url_raw: urlRaw,
+              source_id: source.id,
+              source_name: source.name || '',
+              inserted: ingest.inserted,
+              item_count: items.length,
+              status: 'ok',
+              duration_ms: durationMs,
+              error: null,
+            })
+            await this.store.setStatus({
+              state: 'running',
+              message: `读取列表… ${label}（本批 +${ingest.inserted}）`,
+            })
+            this.broadcast?.('scrape_progress', {
+              phase: 'read_done',
+              sourceId: source.id,
+              sourceName: source.name || '',
+              inserted: ingest.inserted,
+              itemCount: items.length,
+            })
+            return items
+          } catch (err) {
+            const msg = err?.message || String(err)
+            const durationMs = Date.now() - t0
+            // eslint-disable-next-line no-console
+            console.error(`[scheduler] read ${source.id} ${label}`, err)
+            await this.scrapeLog?.append({
+              at: nowIso(),
+              run_id: runId,
+              url: urlDisplay,
+              url_raw: urlRaw,
+              source_id: source.id,
+              source_name: source.name || '',
+              inserted: 0,
+              item_count: 0,
+              status: 'error',
+              duration_ms: durationMs,
+              error: msg,
+            })
+            await this.store.setStatus({
+              state: 'running',
+              message: `读取列表… ${label} 失败：${msg}`,
+            })
+            this.broadcast?.('scrape_progress', {
+              phase: 'read_error',
+              sourceId: source.id,
+              sourceName: source.name || '',
+              error: msg,
+              itemCount: 0,
+              inserted: 0,
+            })
+            return []
+          }
+        }
+
+        const useTwoPhaseRefreshThenRead =
+          this.scrapeSequential &&
+          !this.scrapeFreshContext &&
+          typeof engine.refreshSource === 'function' &&
+          typeof engine.readSourceList === 'function'
+
+        if (useTwoPhaseRefreshThenRead) {
           const gap = Math.max(0, this.scrapeStaggerGapMs)
-          // 单源超时使用完整 SCRAPE_TIMEOUT_MS；不再用「轮次预算」压短超时（否则易误判失败、条数为 0）
+          const perSourceTimeout = this.scrapeTimeoutMs
+          await this.store.setStatus({
+            state: 'running',
+            message: '阶段一：逐个切换页签并刷新搜索…',
+          })
+          for (let i = 0; i < sources.length; i += 1) {
+            if (i > 0 && gap > 0) await sleep(gap)
+            const source = sources[i]
+            const label = source.name || `源 #${source.id}`
+            try {
+              await engine.refreshSource(source, {
+                timeoutMs: perSourceTimeout,
+                softMercariRefresh: this.scrapeSoftMercariRefresh,
+              })
+              this.broadcast?.('scrape_progress', {
+                phase: 'refresh_done',
+                sourceId: source.id,
+                sourceName: source.name || '',
+              })
+              await this.store.setStatus({
+                state: 'running',
+                message: `刷新页签… ${label} 完成`,
+              })
+            } catch (err) {
+              const msg = err?.message || String(err)
+              // eslint-disable-next-line no-console
+              console.error(`[scheduler] refresh ${source.id} ${label}`, err)
+              this.broadcast?.('scrape_progress', {
+                phase: 'refresh_error',
+                sourceId: source.id,
+                sourceName: source.name || '',
+                error: msg,
+              })
+              await this.store.setStatus({
+                state: 'running',
+                message: `刷新页签… ${label} 失败：${msg}`,
+              })
+            }
+          }
+          await this.store.setStatus({
+            state: 'running',
+            message: `阶段二：等待列表更新（${this.scrapePostRefreshWaitMs}ms）…`,
+          })
+          if (this.scrapePostRefreshWaitMs > 0) {
+            await sleep(this.scrapePostRefreshWaitMs)
+          }
+          await this.store.setStatus({
+            state: 'running',
+            message: '阶段二：逐个读取各页商品…',
+          })
+          for (let i = 0; i < sources.length; i += 1) {
+            if (i > 0 && gap > 0) await sleep(gap)
+            await processSourceReadList(sources[i], perSourceTimeout)
+          }
+        } else if (this.scrapeSequential) {
+          const gap = Math.max(0, this.scrapeStaggerGapMs)
           const perSourceTimeout = this.scrapeTimeoutMs
           for (let i = 0; i < sources.length; i += 1) {
             if (i > 0 && gap > 0) await sleep(gap)
@@ -190,7 +355,7 @@ export class ScrapeScheduler {
           )
         }
       } finally {
-        await engine.close()
+        await engine.pruneSourcePages?.(new Set(sources.map((s) => String(s.id))))
       }
 
       await this.store.setStatus({
@@ -202,6 +367,7 @@ export class ScrapeScheduler {
       this.broadcast?.('scrape_complete', { inserted: totalInserted, sources: sources.length })
       return { inserted: totalInserted }
     } catch (error) {
+      await this.disposeScraperEngine()
       const msg = error?.message || String(error)
       await this.scrapeLog?.append({
         at: nowIso(),
