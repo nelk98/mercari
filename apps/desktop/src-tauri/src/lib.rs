@@ -1,5 +1,4 @@
 use std::sync::{Arc, Mutex, OnceLock};
-use std::thread;
 use std::time::{Duration, Instant};
 
 use tauri::{Emitter, Manager};
@@ -139,22 +138,20 @@ fn set_schedule_icon_state(app: tauri::AppHandle, scheduled: bool) {
 }
 
 struct CmdDState {
-    seq: u64,
     times: Vec<Instant>,
 }
 
 static CMD_D_STATE: OnceLock<Mutex<CmdDState>> = OnceLock::new();
 
 fn cmd_d_state() -> &'static Mutex<CmdDState> {
-    CMD_D_STATE.get_or_init(|| Mutex::new(CmdDState { seq: 0, times: Vec::new() }))
+    CMD_D_STATE.get_or_init(|| Mutex::new(CmdDState { times: Vec::new() }))
 }
 
-/// ⌘/Ctrl+D：550ms 内连按 3 次 → 切换定时抓取；仅 1 次（确认无第 2、3 次）→ 维持已读快捷键。
+/// ⌘/Ctrl+D：同一连按串里**第 1 下立即已读**（无延迟）；550ms 内第 3 下切换定时抓取，第 2、3 下不再已读。
+/// 若三连只为暂停抓取，第 1 下仍会触发已读。
 fn handle_command_d_shortcut(app: &tauri::AppHandle) {
     const CHAIN_GAP: Duration = Duration::from_millis(550);
-    const DEBOUNCE: Duration = Duration::from_millis(480);
 
-    let app = app.clone();
     let mut g = cmd_d_state().lock().unwrap_or_else(|e| e.into_inner());
     let now = Instant::now();
     g.times.retain(|t| now.duration_since(*t) <= CHAIN_GAP);
@@ -162,34 +159,17 @@ fn handle_command_d_shortcut(app: &tauri::AppHandle) {
 
     if g.times.len() >= 3 {
         g.times.clear();
-        g.seq = g.seq.wrapping_add(1);
         drop(g);
-        post_schedule_toggle(&app);
+        post_schedule_toggle(app);
         return;
     }
 
-    g.seq = g.seq.wrapping_add(1);
-    let expect_seq = g.seq;
-    drop(g);
-
-    thread::spawn(move || {
-        thread::sleep(DEBOUNCE);
-        let mut g = cmd_d_state().lock().unwrap_or_else(|e| e.into_inner());
-        if g.seq != expect_seq {
-            return;
-        }
-        if g.times.len() == 1 {
-            g.times.clear();
-            g.seq = g.seq.wrapping_add(1);
-            drop(g);
-            let _ = app.emit("mark-read-shortcut", ());
-            let _ = app.emit_to("widget", "mark-read-shortcut", ());
-            let _ = app.emit_to("main", "mark-read-shortcut", ());
-        } else {
-            g.times.clear();
-            g.seq = g.seq.wrapping_add(1);
-        }
-    });
+    if g.times.len() == 1 {
+        drop(g);
+        let _ = app.emit("mark-read-shortcut", ());
+        let _ = app.emit_to("widget", "mark-read-shortcut", ());
+        let _ = app.emit_to("main", "mark-read-shortcut", ());
+    }
 }
 
 fn clamp(start: i32, size: i32, min: i32, max: i32) -> i32 {
