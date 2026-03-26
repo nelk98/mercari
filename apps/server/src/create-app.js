@@ -37,7 +37,10 @@ export const createApp = ({ store, scheduler, eventHub, scrapeLog = null }) => {
 
   app.get('/api/status', async (_req, res) => {
     const state = await store.getState()
-    res.json(state.status)
+    res.json({
+      ...state.status,
+      schedule_active: scheduler.isScheduleActive(),
+    })
   })
 
   app.get('/api/sources', async (_req, res) => {
@@ -119,6 +122,19 @@ export const createApp = ({ store, scheduler, eventHub, scrapeLog = null }) => {
     } else {
       res.json({ ok: true, headed: false, scrapeStarted: false })
     }
+  })
+
+  /** 桌面快捷键：切换定时抓取排期（启动 ↔ 暂停）；单轮 runOnce 可能仍在进行 */
+  app.post('/api/scrape/schedule/toggle', async (_req, res) => {
+    const { scheduled } = scheduler.toggleSchedule()
+    if (scheduled) {
+      await store.setStatus({ message: '定时抓取已启动' })
+      eventHub.broadcast('schedule_state', { scheduled: true })
+    } else {
+      await store.setStatus({ next_run_at: null, message: '定时抓取已暂停' })
+      eventHub.broadcast('schedule_state', { scheduled: false })
+    }
+    res.json({ ok: true, scheduled })
   })
 
   /** 托盘单项切换：有头 ↔ 无头；切到有头时释放引擎并立即跑一轮抓取 */

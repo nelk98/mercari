@@ -6,6 +6,16 @@ const AUTO_COLLAPSE_MS = 5000
 
 document.body.dataset.mode = mode
 
+/** 定时抓取暂停时用灰阶 favicon，与托盘/窗口图标一致 */
+const setFaviconForSchedule = (scheduleActive) => {
+  const link = document.querySelector('link[rel="icon"]')
+  if (!link) return
+  const href = scheduleActive ? '/assets/logo.svg' : '/assets/logo-mono.svg'
+  if (link.getAttribute('href') !== href) {
+    link.setAttribute('href', href)
+  }
+}
+
 const invoke = (cmd, payload = {}) => window.__TAURI__?.core?.invoke?.(cmd, payload).catch(() => {})
 const invokeResult = (cmd, payload = {}) => window.__TAURI__?.core?.invoke?.(cmd, payload).catch(() => null)
 
@@ -104,6 +114,16 @@ const connectScrapeEvents = (onNotify) => {
     es.addEventListener('scrape_complete', bump)
     es.addEventListener('scrape_error', bump)
     es.addEventListener('scrape_skipped', bump)
+    es.addEventListener('schedule_state', (ev) => {
+      void onNotify()
+      try {
+        const d = JSON.parse(ev.data || '{}')
+        if (typeof d.scheduled === 'boolean') {
+          setFaviconForSchedule(d.scheduled)
+          invoke('set_schedule_icon_state', { scheduled: d.scheduled })
+        }
+      } catch (_) {}
+    })
     es.addEventListener('playwright_browser_closed', bump)
     es.onerror = () => {}
     return () => es.close()
@@ -250,6 +270,7 @@ const createMainView = () => {
         request('/api/items?limit=24'),
       ])
       statusLine.textContent = `状态：${status.state} | 上次：${formatHms(status.last_run_at)} | 下次：${formatHms(status.next_run_at)}`
+      setFaviconForSchedule(status.schedule_active !== false)
       renderSources(sources)
       renderItems(items)
       if (status.state === 'running') {
@@ -600,6 +621,7 @@ const createWidgetView = () => {
 
       const unreadCountText = unreadItems.length > 0 ? `上新 ${unreadItems.length} 条` : '暂无未读'
       statusEl.textContent = `${data.state === 'online' ? '在线' : '更新中'} · ${formatHms(data.last_run_at)} · ${unreadCountText}`
+      setFaviconForSchedule(data.schedule_active !== false)
 
       if (data.state === 'running') {
         if (widgetScrapePollTimer == null) {

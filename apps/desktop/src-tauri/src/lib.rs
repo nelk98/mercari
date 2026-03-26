@@ -1,5 +1,10 @@
+use std::sync::{Arc, Mutex, OnceLock};
+use std::thread;
+use std::time::{Duration, Instant};
+
 use tauri::{Emitter, Manager};
 use tauri::{LogicalSize, PhysicalPosition, Position};
+use tauri::image::Image;
 use tauri_plugin_global_shortcut::{Code, Modifiers, ShortcutState};
 use serde::Serialize;
 use serde_json::json;
@@ -24,6 +29,167 @@ fn post_playwright_visual_toggle() {
         }
         Err(err) => eprintln!("[tray] playwright visual toggle: {err}"),
     }
+}
+
+fn post_schedule_toggle(app: &tauri::AppHandle) {
+    let url = format!("{SCRAPE_SERVER_ORIGIN}/api/scrape/schedule/toggle");
+    match ureq::post(&url)
+        .set("Content-Type", "application/json")
+        .timeout(Duration::from_secs(8))
+        .send_json(json!({}))
+    {
+        Ok(resp) => {
+            if (200..300).contains(&resp.status()) {
+                if let Ok(v) = resp.into_json::<serde_json::Value>() {
+                    if let Some(s) = v.get("scheduled").and_then(|x| x.as_bool()) {
+                        apply_schedule_visual(app, s);
+                        return;
+                    }
+                }
+                if let Some(s) = fetch_schedule_active() {
+                    apply_schedule_visual(app, s);
+                }
+            } else {
+                eprintln!(
+                    "[shortcut] schedule toggle: HTTP {}",
+                    resp.status()
+                );
+            }
+        }
+        Err(err) => eprintln!("[shortcut] schedule toggle: {err}"),
+    }
+}
+
+fn fetch_schedule_active() -> Option<bool> {
+    let url = format!("{SCRAPE_SERVER_ORIGIN}/api/status");
+    let resp = ureq::get(&url)
+        .timeout(Duration::from_secs(2))
+        .call()
+        .ok()?;
+    if !(200..300).contains(&resp.status()) {
+        return None;
+    }
+    let v: serde_json::Value = resp.into_json().ok()?;
+    v.get("schedule_active").and_then(|x| x.as_bool())
+}
+
+fn schedule_tray_images() -> (Image<'static>, Image<'static>) {
+    static CACHE: OnceLock<(Image<'static>, Image<'static>)> = OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            const PNG: &[u8] = include_bytes!("../icons/32x32.png");
+            let color = Image::from_bytes(PNG).expect("icons/32x32.png 无效，请在 apps/desktop 执行 pnpm icons");
+            let mut rgba = color.rgba().to_vec();
+            for px in rgba.chunks_exact_mut(4) {
+                let a = px[3];
+                if a == 0 {
+                    continue;
+                }
+                let r = px[0] as f32;
+                let g = px[1] as f32;
+                let b = px[2] as f32;
+                let y = (0.2126 * r + 0.7152 * g + 0.0722 * b).round().clamp(0.0, 255.0) as u8;
+                px[0] = y;
+                px[1] = y;
+                px[2] = y;
+            }
+            let gray = Image::new_owned(rgba, color.width(), color.height());
+            (color.to_owned(), gray)
+        })
+        .clone()
+}
+
+/// 托盘句柄，供暂停/恢复时切换彩色与灰阶图标。
+#[derive(Clone)]
+struct TrayIconSlot(Arc<Mutex<Option<tauri::tray::TrayIcon<tauri::Wry>>>>);
+
+impl TrayIconSlot {
+    fn new() -> Self {
+        Self(Arc::new(Mutex::new(None)))
+    }
+}
+
+fn apply_schedule_visual(app: &tauri::AppHandle, schedule_active: bool) {
+    let (color, gray) = schedule_tray_images();
+    let tray_img = if schedule_active {
+        color.clone()
+    } else {
+        gray.clone()
+    };
+
+    if let Some(slot) = app.try_state::<TrayIconSlot>() {
+        if let Ok(guard) = slot.0.lock() {
+            if let Some(ref tray) = *guard {
+                let _ = tray.set_icon(Some(tray_img.clone()));
+            }
+        }
+    }
+
+    let win_img = if schedule_active { color } else { gray };
+    for label in ["main", "widget"] {
+        if let Some(w) = app.get_webview_window(label) {
+            let _ = w.set_icon(win_img.clone());
+        }
+    }
+}
+
+#[tauri::command]
+fn set_schedule_icon_state(app: tauri::AppHandle, scheduled: bool) {
+    apply_schedule_visual(&app, scheduled);
+}
+
+struct CmdDState {
+    seq: u64,
+    times: Vec<Instant>,
+}
+
+static CMD_D_STATE: OnceLock<Mutex<CmdDState>> = OnceLock::new();
+
+fn cmd_d_state() -> &'static Mutex<CmdDState> {
+    CMD_D_STATE.get_or_init(|| Mutex::new(CmdDState { seq: 0, times: Vec::new() }))
+}
+
+/// ⌘/Ctrl+D：550ms 内连按 3 次 → 切换定时抓取；仅 1 次（确认无第 2、3 次）→ 维持已读快捷键。
+fn handle_command_d_shortcut(app: &tauri::AppHandle) {
+    const CHAIN_GAP: Duration = Duration::from_millis(550);
+    const DEBOUNCE: Duration = Duration::from_millis(480);
+
+    let app = app.clone();
+    let mut g = cmd_d_state().lock().unwrap_or_else(|e| e.into_inner());
+    let now = Instant::now();
+    g.times.retain(|t| now.duration_since(*t) <= CHAIN_GAP);
+    g.times.push(now);
+
+    if g.times.len() >= 3 {
+        g.times.clear();
+        g.seq = g.seq.wrapping_add(1);
+        drop(g);
+        post_schedule_toggle(&app);
+        return;
+    }
+
+    g.seq = g.seq.wrapping_add(1);
+    let expect_seq = g.seq;
+    drop(g);
+
+    thread::spawn(move || {
+        thread::sleep(DEBOUNCE);
+        let mut g = cmd_d_state().lock().unwrap_or_else(|e| e.into_inner());
+        if g.seq != expect_seq {
+            return;
+        }
+        if g.times.len() == 1 {
+            g.times.clear();
+            g.seq = g.seq.wrapping_add(1);
+            drop(g);
+            let _ = app.emit("mark-read-shortcut", ());
+            let _ = app.emit_to("widget", "mark-read-shortcut", ());
+            let _ = app.emit_to("main", "mark-read-shortcut", ());
+        } else {
+            g.times.clear();
+            g.seq = g.seq.wrapping_add(1);
+        }
+    });
 }
 
 fn clamp(start: i32, size: i32, min: i32, max: i32) -> i32 {
@@ -291,20 +457,24 @@ pub fn run() {
             resize_widget_height,
             get_widget_size,
             get_widget_dock,
-            sync_widget_position
+            sync_widget_position,
+            set_schedule_icon_state
         ])
         .setup(|app| {
+            let tray_slot = TrayIconSlot::new();
+            app.manage(tray_slot.clone());
+
             app.handle().plugin(
                 tauri_plugin_global_shortcut::Builder::new()
                     .with_shortcuts(["CommandOrControl+D"])?
                     .with_handler(|app, shortcut, event| {
-                        if event.state == ShortcutState::Pressed
-                            && (shortcut.matches(Modifiers::SUPER, Code::KeyD)
-                                || shortcut.matches(Modifiers::CONTROL, Code::KeyD))
+                        if event.state != ShortcutState::Pressed {
+                            return;
+                        }
+                        if shortcut.matches(Modifiers::SUPER, Code::KeyD)
+                            || shortcut.matches(Modifiers::CONTROL, Code::KeyD)
                         {
-                            let _ = app.emit("mark-read-shortcut", ());
-                            let _ = app.emit_to("widget", "mark-read-shortcut", ());
-                            let _ = app.emit_to("main", "mark-read-shortcut", ());
+                            handle_command_d_shortcut(app);
                         }
                     })
                     .build(),
@@ -343,10 +513,17 @@ pub fn run() {
                     &quit_item,
                 ],
             )?;
-            let icon = app.default_window_icon().cloned().expect("icon not found");
+            let handle = app.handle().clone();
+            let initial_schedule = fetch_schedule_active().unwrap_or(true);
+            let (icon_color, icon_gray) = schedule_tray_images();
+            let initial_icon = if initial_schedule {
+                icon_color.clone()
+            } else {
+                icon_gray.clone()
+            };
 
-            TrayIconBuilder::new()
-                .icon(icon)
+            let tray = TrayIconBuilder::new()
+                .icon(initial_icon)
                 .menu(&menu)
                 .show_menu_on_left_click(true)
                 .on_menu_event(|app, event| match event.id().as_ref() {
@@ -357,6 +534,13 @@ pub fn run() {
                     _ => {}
                 })
                 .build(app)?;
+
+            if let Ok(mut guard) = tray_slot.0.lock() {
+                *guard = Some(tray);
+            }
+
+            apply_schedule_visual(&handle, initial_schedule);
+
             Ok(())
         })
         .run(tauri::generate_context!())

@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "tauri": "tauri",
+    "icons": "tauri icon src/assets/logo.svg",
     "build": "echo \"desktop build via tauri\"",
     "test": "echo \"desktop tests skipped\""
   },

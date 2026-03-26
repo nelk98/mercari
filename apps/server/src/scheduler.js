@@ -425,4 +425,19 @@ export class ScrapeScheduler {
       this.timer = null
     }
   }
+
+  /** 定时链是否在运行（下一轮 setTimeout 已排期） */
+  isScheduleActive() {
+    return this.timer != null
+  }
+
+  /** 在「排期抓取」与「暂停排期」之间切换；不影响正在执行的 runOnce */
+  toggleSchedule() {
+    if (this.timer) {
+      this.stop()
+      return { scheduled: false }
+    }
+    this.start()
+    return { scheduled: true }
+  }
 }
